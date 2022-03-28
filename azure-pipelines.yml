@@ -1,0 +1,252 @@
+name: A pipeline for testing, building and deploying the Botfront chatbot platform
+
+resources:
+- repo: self
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+trigger:
+  branches:
+    include:
+    - main
+    - dev
+  paths:
+    exclude:
+    - README.md
+
+variables:
+  tag: '$(Build.BuildId)'
+  isProd: $[eq(variables['Build.SourceBranch'], 'refs/heads/main')]
+  isTest: $[eq(variables['Build.SourceBranch'], 'refs/heads/dev')]
+
+  azureContainerRegistryTest: tkupaohtestcontainerregistry.azurecr.io
+  azureContainerRegistryProd: tkupaohtuotcontainerregistry.azurecr.io
+  azureSubscriptionEndpointTest: tku-palveluohjain-testi-sc
+  azureSubscriptionEndpointProd: tku-palveluohjain-tuotanto-sc
+  kubernetesServiceConnectionTest: tku-palveluohjain-testi-aks-sc
+  kubernetesServiceConnectionProd: tku-palveluohjain-tuotanto-aks-sc
+  dockerRegistryEndpointTest: tku-palveluohjain-testi-docker-sc
+  dockerRegistryEndpointProd: tku-palveluohjain-tuotanto-docker-sc
+  azurestorageaccountnameTest: tkupaohteststorage
+  azurestorageaccountnameProd: tkupaohtuotstorage
+
+  botfrontRasaImageTest: tkupaohtestcontainerregistry.azurecr.io/rasa_for_botfront_base:latest
+  botfrontRasaImageProd: tkupaohtuotcontainerregistry.azurecr.io/rasa_for_botfront_base:latest
+  botfrontRasaActionsImage: rasa/rasa-sdk:2.8.2
+
+  azurefilesharebotfrontmodels: fileshare-botfront-models
+  azurefilesharebotfrontmodelsdev: fileshare-botfront-models-dev
+  botfrontprojectid: adgucwSrxaCaNgaLL
+
+stages:
+
+- stage: Test
+  displayName: Run Rasa Actions unit tests
+  jobs:
+  - job: UnitTests
+    steps:
+    - task: UsePythonVersion@0
+      displayName: 'Use Python 3.8'
+      inputs:
+        versionSpec: '3.8'
+
+    - script: python3 -m pip install --upgrade pip setuptools wheel
+      displayName: 'Install tools'
+
+    - script: pip install -r test/requirements.txt
+      displayName: 'Installing requirements'
+
+    - script: python3 -m unittest discover -s test --verbose
+      displayName: 'Run tests'
+
+- stage: BuildTest
+  displayName: Build and push Rasa images for test environment
+  condition: and(eq(variables.isTest, true), succeeded())
+  variables:
+    - group: tku-paoh-test-variable-group
+  dependsOn: Test
+  jobs:
+  - job: Build
+    displayName: Build and Push Rasa images to ACR
+    steps:
+    - task: DockerCompose@0
+      displayName: Build Rasa docker-compose services
+      inputs:
+        action: Build services
+        azureSubscriptionEndpoint: $(azureSubscriptionEndpointTest)
+        azureContainerRegistry: $(azureContainerRegistryTest)
+        dockerComposeFile: docker-compose.yml
+        projectName: $(Build.Repository.Name)
+        qualifyImageNames: true
+        additionalImageTags: $(tag)
+        dockerComposeFileArgs: |
+          IMAGES_CURRENT_RASA=$(botfrontRasaImageTest)
+          IMAGES_CURRENT_ACTIONS=$(botfrontRasaActionsImage)
+    - task: DockerCompose@0
+      displayName: Push Rasa docker-compose services
+      inputs:
+        action: Push services
+        azureSubscriptionEndpoint: $(azureSubscriptionEndpointTest)
+        azureContainerRegistry: $(azureContainerRegistryTest)
+        dockerComposeFile: docker-compose.yml
+        projectName: $(Build.Repository.Name)
+        qualifyImageNames: true
+        additionalImageTags: $(tag)
+        dockerComposeFileArgs: |
+          IMAGES_CURRENT_RASA=$(botfrontRasaImageTest)
+          IMAGES_CURRENT_ACTIONS=$(botfrontRasaActionsImage)
+
+
+- stage: BuildProd
+  displayName: Build and push Rasa images for prod environment
+  condition: and(eq(variables.isProd, true), succeeded())
+  variables:
+    - group: tku-paoh-tuot-variable-group
+  dependsOn: Test
+  jobs:
+  - job: Build
+    displayName: Build and Push Rasa images to ACR
+    steps:
+    - task: DockerCompose@0
+      displayName: Build Rasa docker-compose services
+      inputs:
+        action: Build services
+        azureSubscriptionEndpoint: $(azureSubscriptionEndpointProd)
+        azureContainerRegistry: $(azureContainerRegistryProd)
+        dockerComposeFile: docker-compose.yml
+        projectName: $(Build.Repository.Name)
+        qualifyImageNames: true
+        additionalImageTags: $(tag)
+        dockerComposeFileArgs: |
+          IMAGES_CURRENT_RASA=$(botfrontRasaImageProd)
+          IMAGES_CURRENT_ACTIONS=$(botfrontRasaActionsImage)
+    - task: DockerCompose@0
+      displayName: Push Rasa docker-compose services
+      inputs:
+        action: Push services
+        azureSubscriptionEndpoint: $(azureSubscriptionEndpointProd)
+        azureContainerRegistry: $(azureContainerRegistryProd)
+        dockerComposeFile: docker-compose.yml
+        projectName: $(Build.Repository.Name)
+        qualifyImageNames: true
+        additionalImageTags: $(tag)
+        dockerComposeFileArgs: |
+          IMAGES_CURRENT_RASA=$(botfrontRasaImageProd)
+          IMAGES_CURRENT_ACTIONS=$(botfrontRasaActionsImage)
+
+
+- stage: DeployTest
+  condition: and(eq(variables.isTest, true), succeeded())
+  dependsOn: BuildTest
+  displayName: Deploy Rasa to test environment to Azure AKS
+  variables:
+    - group: tku-paoh-test-variable-group
+  jobs:
+  - job: Deploy
+    displayName: Deploy
+    steps:
+
+    - task: KubernetesManifest@0
+      displayName: Create Azure Fileshare secret
+      inputs:
+        action: createSecret
+        secretType: generic
+        namespace: default
+        kubernetesServiceConnection: $(kubernetesServiceConnectionTest)
+        secretName: azurefilesharesecret
+        secretArguments:
+          --from-literal=azurestorageaccountname=$(azurestorageaccountnameTest)
+          --from-literal=azurestorageaccountkey=$(azurestorageaccountkey)
+
+    - task: KubernetesManifest@0
+      displayName: Create ImagePullSecret
+      inputs:
+        action: createSecret
+        namespace: default
+        kubernetesServiceConnection: $(kubernetesServiceConnectionTest)
+        secretName: testimagepullsecret
+        dockerRegistryEndpoint: $(dockerRegistryEndpointTest)
+
+    - task: replacetokens@3
+      displayName: 'Replace tokens in .yaml files'
+      inputs:
+        targetFiles: |
+          $(Build.SourcesDirectory)/kube/*.yaml
+        verbosity: detailed
+        tokenPrefix: '__'
+        tokenSuffix: '__'
+        
+    - task: KubernetesManifest@0
+      displayName: Deploy to Kubernetes test environment cluster
+      inputs:
+        action: deploy
+        namespace: default
+        kubernetesServiceConnection: $(kubernetesServiceConnectionTest)
+        manifests: |
+          $(Build.SourcesDirectory)/kube/actions*.yaml
+          $(Build.SourcesDirectory)/kube/rasa-dev-service.yaml
+          $(Build.SourcesDirectory)/kube/rasa-dev-deployment.yaml
+        imagePullSecrets: |
+          testimagepullsecret
+        containers: |
+          $(dockerregistryname).azurecr.io/rasaplatform_actions:$(tag)
+          $(dockerregistryname).azurecr.io/rasaplatform_rasa:$(tag)
+
+
+- stage: DeployProd
+  condition: and(eq(variables.isProd, true), succeeded())
+  dependsOn: BuildProd
+  displayName: Deploy Rasa to production environment to Azure AKS
+  variables:
+    - group: tku-paoh-tuot-variable-group
+  jobs:
+  - job: Deploy
+    displayName: Deploy
+    steps:
+
+    - task: KubernetesManifest@0
+      displayName: Create Azure Fileshare secret
+      inputs:
+        action: createSecret
+        secretType: generic
+        namespace: default
+        kubernetesServiceConnection: $(kubernetesServiceConnectionProd)
+        secretName: azurefilesharesecret
+        secretArguments:
+          --from-literal=azurestorageaccountname=$(azurestorageaccountnameProd)
+          --from-literal=azurestorageaccountkey=$(azurestorageaccountkey)
+
+    - task: KubernetesManifest@0
+      displayName: Create ImagePullSecret
+      inputs:
+        action: createSecret
+        namespace: default
+        kubernetesServiceConnection: $(kubernetesServiceConnectionProd)
+        secretName: prodimagepullsecret
+        dockerRegistryEndpoint: $(dockerRegistryEndpointProd)
+
+    - task: replacetokens@3
+      displayName: 'Replace tokens in .yaml files'
+      inputs:
+        targetFiles: |
+          $(Build.SourcesDirectory)/kube/*.yaml
+        verbosity: detailed
+        tokenPrefix: '__'
+        tokenSuffix: '__'
+        
+    - task: KubernetesManifest@0
+      displayName: Deploy to Kubernetes production environment cluster
+      inputs:
+        action: deploy
+        namespace: default
+        kubernetesServiceConnection: $(kubernetesServiceConnectionProd)
+        manifests: |
+          $(Build.SourcesDirectory)/kube/actions*.yaml
+          $(Build.SourcesDirectory)/kube/rasa*.yaml
+        imagePullSecrets: |
+          prodimagepullsecret
+        containers: |
+          $(dockerregistryname).azurecr.io/rasaplatform_actions:$(tag)
+          $(dockerregistryname).azurecr.io/rasaplatform_rasa:$(tag)
+

@@ -1,0 +1,91 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  annotations:
+    kompose.cmd: C:\WINDOWS\kompose.exe convert
+    kompose.version: 1.21.0 (992df58d8)
+  creationTimestamp: null
+  labels:
+    io.kompose.service: rasa
+  name: rasa
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      io.kompose.service: rasa
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      annotations:
+        kompose.cmd: C:\WINDOWS\kompose.exe convert
+        kompose.version: 1.21.0 (992df58d8)
+      creationTimestamp: null
+      labels:
+        io.kompose.service: rasa
+    spec:
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                - key: io.kompose.service
+                  operator: In
+                  values:
+                  - rasa-dev
+              topologyKey: "kubernetes.io/hostname"
+      containers:
+      - args:
+        - rasa
+        - run
+        - --enable-api
+        - --auth-token
+        - __rasaauthtoken__
+        env:
+        - name: BF_PROJECT_ID
+          value: __botfrontprojectid__
+        - name: BF_URL
+          value: http://botfront.default.svc.cluster.local:3000/graphql
+        - name: BOTFRONT_ENV
+          value: production
+        - name: API_KEY
+          value: __botfrontauthtoken__
+        - name: DEV_MODELS_PATH
+          value: /app/models-dev
+        image: __dockerregistryname__.azurecr.io/rasaplatform_rasa:__tag__
+        imagePullPolicy: Always
+        name: rasa
+        ports:
+        - containerPort: 5005
+        resources:
+          requests:
+            memory: "4Gi"
+        livenessProbe:
+          httpGet:
+            path: /
+            port: 5005
+          initialDelaySeconds: 60
+          periodSeconds: 15
+          timeoutSeconds: 5
+          failureThreshold: 10
+        volumeMounts:
+        - mountPath: /app/models
+          name: models
+        - mountPath: /app/models-dev
+          name: models-dev
+        - mountPath: /tmp
+          name: tmp-cache
+      restartPolicy: Always
+      serviceAccountName: ""
+      volumes:
+      - name: models
+        persistentVolumeClaim:
+          claimName: fileshare-botfront-models
+      - name: models-dev
+        persistentVolumeClaim:
+          claimName: fileshare-botfront-models-dev
+      - name: tmp-cache
+        emptyDir: {}
+status: {}
